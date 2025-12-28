@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>リアルタイム背景生成カメラ</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; }
+        video, canvas { max-width: 100%; border-radius: 8px; background: #000; margin-bottom: 10px; }
+        .controls { margin: 20px 0; padding: 15px; background: #333; border-radius: 10px; }
+        button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; font-weight: bold; }
+        #startBtn { background: #007bff; color: white; }
+        #switchBtn { background: #6c757d; color: white; display: none; }
+        #captureBtn { background: #28a745; color: white; }
+        #captureBtn:disabled { background: #555; cursor: not-allowed; }
+        .save-controls { margin-top: 15px; display: none; }
+        #downloadBtn { background: #ff9800; color: white; }
+        input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 60px; margin: 5px; }
+        .status { font-size: 16px; color: #ffeb3b; margin: 10px; font-weight: bold; min-height: 1.2em; }
+        .hint { font-size: 12px; color: #aaa; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <h2>人が消えるカメラ (リアルタイム版)</h2>
+
+    <video id="video" autoplay playsinline></video>
+    
+    <div class="controls">
+        <button id="startBtn">カメラ起動</button>
+        <button id="switchBtn">切替</button>
+        <div>
+            合計枚数: <input type="number" id="nos" value="30" min="5" max="200">
+            速度(ms): <input type="number" id="cooldown" value="100" min="10">
+        </div>
+        <button id="captureBtn" disabled>撮影開始</button>
+        <div class="status" id="status">カメラを許可してください</div>
+    </div>
+
+    <div id="resultContainer">
+        <p>【生成中の背景プレビュー】</p>
+        <canvas id="resultCanvas"></canvas>
+        <div class="hint">※撮影が進むほど、動いているものが薄くなっていきます。</div>
+    </div>
+
+<script>
+    const video = document.getElementById('video');
+    const resultCanvas = document.getElementById('resultCanvas');
+    const startBtn = document.getElementById('startBtn');
+    const switchBtn = document.getElementById('switchBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const saveControls = document.getElementById('saveControls');
+    const status = document.getElementById('status');
+
+    let currentStream = null;
+    let currentFacingMode = "environment";
+    let cumulativeData = null; // ピクセルごとの合計値を保存する配列
+
+    async function initCamera(facingMode) {
+        if (currentStream) currentStream.getTracks().forEach(track => track.stop());
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: facingMode }, 
+                audio: false 
+            });
+            currentStream = stream;
+            video.srcObject = stream;
+            status.innerText = "カメラ固定推奨！「撮影開始」をタップ";
+            captureBtn.disabled = false;
+            startBtn.style.display = 'none';
+            switchBtn.style.display = 'inline-block';
+        } catch (err) {
+            status.innerText = "エラー: " + err.message;
+        }
+    }
+
+    startBtn.onclick = () => initCamera(currentFacingMode);
+    switchBtn.onclick = () => {
+        currentFacingMode = (currentFacingMode === "environment") ? "user" : "environment";
+        initCamera(currentFacingMode);
+    };
+
+    captureBtn.onclick = async () => {
+        const numFrames = parseInt(document.getElementById("nos").value) || 30;
+        const interval = parseInt(document.getElementById("cooldown").value) || 100;
+
+        captureBtn.disabled = true;
+        switchBtn.disabled = true;
+        
+        const w = video.videoWidth;
+        const h = video.videoHeight;
+        resultCanvas.width = w;
+        resultCanvas.height = h;
+        
+        const ctx = document.createElement('canvas').getContext('2d');
+        ctx.canvas.width = w;
+        ctx.canvas.height = h;
+        const resultCtx = resultCanvas.getContext('2d');
+        const outputImage = resultCtx.createImageData(w, h);
+        
+        // 累積用配列の初期化 (RGBそれぞれの合計を保持するため Float64Array を使用)
+        cumulativeData = new Float64Array(w * h * 3); 
+
+        for (let f = 1; f <= numFrames; f++) {
+            status.innerText = `生成中... (${f} / ${numFrames} 枚)`;
+            
+            // 現在のフレームを取得
+            ctx.drawImage(video, 0, 0, w, h);
+            const frameData = ctx.getImageData(0, 0, w, h).data;
+
+            // 累積計算とプレビュー用平均値の算出
+            for (let i = 0; i < w * h; i++) {
+                const rIdx = i * 4;   // RGBA
+                const cIdx = i * 3;   // RGB (累積用)
+
+                // 各チャンネルを累積
+                cumulativeData[cIdx]     += frameData[rIdx];     // R
+                cumulativeData[cIdx + 1] += frameData[rIdx + 1]; // G
+                cumulativeData[cIdx + 2] += frameData[rIdx + 2]; // B
+
+                // プレビュー用に現在の平均をセット
+                outputImage.data[rIdx]     = cumulativeData[cIdx] / f;
+                outputImage.data[rIdx + 1] = cumulativeData[cIdx + 1] / f;
+                outputImage.data[rIdx + 2] = cumulativeData[cIdx + 2] / f;
+                outputImage.data[rIdx + 3] = 255; // Alpha
+            }
+
+            // 画面を更新
+            resultCtx.putImageData(outputImage, 0, 0);
+
+            // 指定の間隔待機
+            if (f < numFrames) await new Promise(r => setTimeout(r, interval));
+        }
+
+        status.innerText = "背景生成が完了しました！";
+        captureBtn.disabled = false;
+        switchBtn.disabled = false;
+    };
+</script>
+</body>
+</html>
