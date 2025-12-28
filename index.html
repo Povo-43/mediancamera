@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人が消えるカメラ</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; }
+        video, canvas { max-width: 100%; border-radius: 8px; background: #000; margin-bottom: 10px; }
+        .controls { margin: 20px 0; padding: 15px; background: #333; border-radius: 10px; }
+        button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; font-weight: bold; }
+        #startBtn { background: #007bff; color: white; }
+        #captureBtn { background: #28a745; color: white; }
+        #captureBtn:disabled { background: #555; cursor: not-allowed; }
+        input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 100px; margin: 5px; }
+        .status { font-size: 16px; color: #ffeb3b; margin: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>人が消えるカメラ</h2>
+
+    <video id="video" autoplay playsinline></video>
+    
+    <div class="controls">
+        <button id="startBtn">カメラ起動</button>
+        <div>
+            枚数: <input type="number" id="nos" value="5" min="3" max="100">
+            間隔(ms): <input type="number" id="cooldown" value="1000" min="10">
+        </div>
+        <button id="captureBtn" disabled>撮影開始</button>
+        <div class="status" id="status">カメラを許可してください</div>
+    </div>
+
+    <div id="resultContainer">
+        <p>【生成された背景】</p>
+        <canvas id="resultCanvas"></canvas>
+    </div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+
+<script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const resultCanvas = document.getElementById('resultCanvas');
+    const startBtn = document.getElementById('startBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const status = document.getElementById('status');
+
+    let capturedFrames = [];
+
+    startBtn.onclick = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: "environment" }, 
+                audio: false 
+            });
+            video.srcObject = stream;
+            status.innerText = "固定して「撮影開始」を押してください";
+            captureBtn.disabled = false;
+            startBtn.style.display = 'none';
+        } catch (err) {
+            status.innerText = "エラー: " + err.message;
+        }
+    };
+
+    captureBtn.onclick = async () => {
+        // 実行時の入力値を取得
+        const numFrames = parseInt(document.getElementById("nos").value) || 5;
+        const interval = parseInt(document.getElementById("cooldown").value) || 1000;
+
+        captureBtn.disabled = true;
+        capturedFrames = [];
+        
+        const w = video.videoWidth;
+        const h = video.videoHeight;
+        canvas.width = resultCanvas.width = w;
+        canvas.height = resultCanvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        // 1. 撮影フェーズ
+        for (let i = 0; i < numFrames; i++) {
+            status.innerText = `撮影中: ${i + 1} / ${numFrames}`;
+            ctx.drawImage(video, 0, 0, w, h);
+            capturedFrames.push(ctx.getImageData(0, 0, w, h).data);
+            if (i < numFrames - 1) await new Promise(r => setTimeout(r, interval));
+        }
+
+        status.innerText = "計算中... (ブラウザが少し固まります)";
+        
+        // 描画更新を待つために少し遅延
+        await new Promise(r => requestAnimationFrame(r));
+        await new Promise(r => setTimeout(r, 100));
+
+        // 2. 中央値計算フェーズ
+        processMedian(w, h, numFrames);
+    };
+
+    function processMedian(w, h, numFrames) {
+        const resultCtx = resultCanvas.getContext('2d');
+        const output = resultCtx.createImageData(w, h);
+        const numPixels = w * h;
+
+        for (let i = 0; i < numPixels; i++) {
+            const idx = i * 4;
+            for (let c = 0; c < 3; c++) {
+                const values = [];
+                for (let f = 0; f < numFrames; f++) {
+                    values.push(capturedFrames[f][idx + c]);
+                }
+                values.sort((a, b) => a - b);
+                output.data[idx + c] = values[Math.floor(numFrames / 2)];
+            }
+            output.data[idx + 3] = 255;
+        }
+
+        resultCtx.putImageData(output, 0, 0);
+        status.innerText = "完了！動いているものが消えました。";
+        captureBtn.disabled = false;
+    }
+</script>
+</body>
+</html>
