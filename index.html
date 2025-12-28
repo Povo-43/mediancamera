@@ -10,9 +10,10 @@
         .controls { margin: 20px 0; padding: 15px; background: #333; border-radius: 10px; }
         button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; font-weight: bold; }
         #startBtn { background: #007bff; color: white; }
+        #switchBtn { background: #6c757d; color: white; display: none; }
         #captureBtn { background: #28a745; color: white; }
         #captureBtn:disabled { background: #555; cursor: not-allowed; }
-        input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 100px; margin: 5px; }
+        input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 80px; margin: 5px; }
         .status { font-size: 16px; color: #ffeb3b; margin: 10px; font-weight: bold; }
     </style>
 </head>
@@ -24,6 +25,7 @@
     
     <div class="controls">
         <button id="startBtn">カメラ起動</button>
+        <button id="switchBtn">カメラ切り替え</button>
         <div>
             枚数: <input type="number" id="nos" value="5" min="3" max="100">
             間隔(ms): <input type="number" id="cooldown" value="1000" min="10">
@@ -44,32 +46,53 @@
     const canvas = document.getElementById('canvas');
     const resultCanvas = document.getElementById('resultCanvas');
     const startBtn = document.getElementById('startBtn');
+    const switchBtn = document.getElementById('switchBtn');
     const captureBtn = document.getElementById('captureBtn');
     const status = document.getElementById('status');
 
     let capturedFrames = [];
+    let currentStream = null;
+    let currentFacingMode = "environment"; // 背面カメラをデフォルトに設定
 
-    startBtn.onclick = async () => {
+    // カメラを起動・再起動する関数
+    async function initCamera(facingMode) {
+        // 既存のストリームがあれば停止
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+        }
+
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { facingMode: "environment" }, 
+                video: { facingMode: facingMode }, 
                 audio: false 
             });
+            currentStream = stream;
             video.srcObject = stream;
             status.innerText = "固定して「撮影開始」を押してください";
             captureBtn.disabled = false;
+            
+            // UIの表示切り替え
             startBtn.style.display = 'none';
+            switchBtn.style.display = 'inline-block';
         } catch (err) {
             status.innerText = "エラー: " + err.message;
         }
+    }
+
+    startBtn.onclick = () => initCamera(currentFacingMode);
+
+    switchBtn.onclick = () => {
+        // モードを切り替え
+        currentFacingMode = (currentFacingMode === "environment") ? "user" : "environment";
+        initCamera(currentFacingMode);
     };
 
     captureBtn.onclick = async () => {
-        // 実行時の入力値を取得
         const numFrames = parseInt(document.getElementById("nos").value) || 5;
         const interval = parseInt(document.getElementById("cooldown").value) || 1000;
 
         captureBtn.disabled = true;
+        switchBtn.disabled = true; // 撮影中は切り替え不可
         capturedFrames = [];
         
         const w = video.videoWidth;
@@ -86,9 +109,9 @@
             if (i < numFrames - 1) await new Promise(r => setTimeout(r, interval));
         }
 
-        status.innerText = "計算中... (ブラウザが少し固まります)";
+        status.innerText = "計算中... (中央値を算出しています)";
         
-        // 描画更新を待つために少し遅延
+        // 描画更新を待つ
         await new Promise(r => requestAnimationFrame(r));
         await new Promise(r => setTimeout(r, 100));
 
@@ -103,20 +126,23 @@
 
         for (let i = 0; i < numPixels; i++) {
             const idx = i * 4;
+            // RGBの各チャンネルごとに計算
             for (let c = 0; c < 3; c++) {
                 const values = [];
                 for (let f = 0; f < numFrames; f++) {
                     values.push(capturedFrames[f][idx + c]);
                 }
+                // 昇順に並び替えて中央の値を取得（ノイズ除去）
                 values.sort((a, b) => a - b);
                 output.data[idx + c] = values[Math.floor(numFrames / 2)];
             }
-            output.data[idx + 3] = 255;
+            output.data[idx + 3] = 255; // Alpha
         }
 
         resultCtx.putImageData(output, 0, 0);
         status.innerText = "完了！動いているものが消えました。";
         captureBtn.disabled = false;
+        switchBtn.disabled = false;
     }
 </script>
 </body>
