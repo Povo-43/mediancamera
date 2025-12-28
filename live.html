@@ -4,8 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>人が消えるカメラ(live)</title>
-    <meta property="og:title" content="人が消えるカメラ(live)">
-    <meta property="og:description" content="最貧値フィルタで動く人を取り除けるサイト。">
     <style>
         body { font-family: sans-serif; text-align: center; background: #1a1a1a; color: white; margin: 0; padding: 20px; }
         video, canvas { max-width: 100%; border-radius: 8px; background: #000; margin-bottom: 10px; }
@@ -13,27 +11,27 @@
         button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; font-weight: bold; }
         #startBtn { background: #007bff; color: white; }
         #captureBtn { background: #28a745; color: white; }
-        #captureBtn:disabled { background: #555; }
+        #resetBtn { background: #dc3545; color: white; }
         input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 60px; }
         .status { font-size: 16px; color: #ffeb3b; margin: 10px; font-weight: bold; }
-        .desc { font-size: 13px; color: #ccc; margin-bottom: 10px; }
     </style>
 </head>
 <body>
 
-    <h2>人が消えるカメラ(live)</h2>
-    <p class="desc">動いていない部分（背景）を少しずつ拾い集めて合成します。</p>
+    <h2>人が消えるカメラ (統計的除去)</h2>
+    <p>カメラを固定してください。動いている物体が消え、背景だけが残ります。</p>
 
     <video id="video" autoplay playsinline style="display:none;"></video>
     <canvas id="resultCanvas"></canvas>
     
     <div class="controls">
         <button id="startBtn">カメラ起動</button>
+        <button id="captureBtn" disabled>生成開始</button>
+        <button id="resetBtn">リセット</button>
         <div>
-            感度(しきい値): <input type="number" id="threshold" value="30" min="1" max="100">
-            <small>※値が小さいほど厳密に背景を選別します</small>
+            感度: <input type="number" id="threshold" value="25" min="1" max="100">
+            <small>（小さいほど判定がシビアになります）</small>
         </div>
-        <button id="captureBtn" disabled>生成開始（ループ）</button>
         <div class="status" id="status">カメラを起動してください</div>
     </div>
 
@@ -43,33 +41,45 @@
     const resultCtx = resultCanvas.getContext('2d', { willReadFrequently: true });
     const startBtn = document.getElementById('startBtn');
     const captureBtn = document.getElementById('captureBtn');
+    const resetBtn = document.getElementById('resetBtn');
     const status = document.getElementById('status');
 
     let isProcessing = false;
-    let lastFrameData = null;
+    let backgroundData = null; // 蓄積された背景
+    let lastFrameData = null; // 直前のフレーム
 
     async function initCamera() {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-        video.srcObject = stream;
-        video.onloadedmetadata = () => {
-            resultCanvas.width = video.videoWidth;
-            resultCanvas.height = video.videoHeight;
-            status.innerText = "カメラ固定必須！ボタンを押すと合成開始";
-            captureBtn.disabled = false;
-            startBtn.style.display = 'none';
-        };
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: "environment", width: 640, height: 480 }, 
+                audio: false 
+            });
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                resultCanvas.width = video.videoWidth;
+                resultCanvas.height = video.videoHeight;
+                status.innerText = "カメラ固定完了。生成開始を押してください。";
+                captureBtn.disabled = false;
+                startBtn.style.display = 'none';
+            };
+        } catch (e) {
+            alert("カメラの起動に失敗しました。");
+        }
     }
 
     startBtn.onclick = initCamera;
 
     captureBtn.onclick = () => {
         isProcessing = !isProcessing;
-        captureBtn.innerText = isProcessing ? "停止" : "生成開始（ループ）";
-        if (isProcessing) {
-            // 初回フレームを現在の背景としてセット
-            resultCtx.drawImage(video, 0, 0);
-            processLoop();
-        }
+        captureBtn.innerText = isProcessing ? "一時停止" : "生成再開";
+        if (isProcessing) processLoop();
+    };
+
+    resetBtn.onclick = () => {
+        backgroundData = null;
+        lastFrameData = null;
+        resultCtx.clearRect(0, 0, resultCanvas.width, resultCanvas.height);
+        status.innerText = "リセットしました。";
     };
 
     function processLoop() {
@@ -77,38 +87,44 @@
 
         const w = resultCanvas.width;
         const h = resultCanvas.height;
-        const threshold = parseInt(document.getElementById("threshold").value) || 30;
+        const threshold = parseInt(document.getElementById("threshold").value) || 25;
 
-        // 作業用キャンバス
+        // 現在のフレームを描画してデータを取得
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = w;
         tempCanvas.height = h;
         const tempCtx = tempCanvas.getContext('2d');
-        
-        // 1. 最新のカメラ映像を取得
         tempCtx.drawImage(video, 0, 0);
         const currentFrame = tempCtx.getImageData(0, 0, w, h);
-        
-        // 2. 現在の「完成途中の背景」を取得
-        const backgroundFrame = resultCtx.getImageData(0, 0, w, h);
-        
-        // 3. 比較と合成
-        // 前回のフレームとの差分ではなく、「今の背景」と「新しい映像」を比較
-        for (let i = 0; i < currentFrame.data.length; i += 4) {
-            const rDiff = Math.abs(currentFrame.data[i] - backgroundFrame.data[i]);
-            const gDiff = Math.abs(currentFrame.data[i+1] - backgroundFrame.data[i+1]);
-            const bDiff = Math.abs(currentFrame.data[i+2] - backgroundFrame.data[i+2]);
-            
-            // 変化がしきい値より小さい（＝動いていない）ピクセルだけを更新
-            // これにより、動いている人は無視され、背景だけが最新の状態に保たれる
-            if (rDiff < threshold && gDiff < threshold && bDiff < threshold) {
-                backgroundFrame.data[i] = currentFrame.data[i];
-                backgroundFrame.data[i+1] = currentFrame.data[i+1];
-                backgroundFrame.data[i+2] = currentFrame.data[i+2];
+
+        if (!backgroundData) {
+            // 初回実行時：現在のフレームを背景の基礎にする
+            backgroundData = new ImageData(new Uint8ClampedArray(currentFrame.data), w, h);
+            lastFrameData = new ImageData(new Uint8ClampedArray(currentFrame.data), w, h);
+        } else {
+            for (let i = 0; i < currentFrame.data.length; i += 4) {
+                // 「現在のフレーム」と「直前のフレーム」の差分を計算（動き検知）
+                const diff = Math.abs(currentFrame.data[i] - lastFrameData.data[i]) +
+                             Math.abs(currentFrame.data[i+1] - lastFrameData.data[i+1]) +
+                             Math.abs(currentFrame.data[i+2] - lastFrameData.data[i+2]);
+
+                // 動きが少ないピクセルだけを背景バッファに少しずつ混ぜる（学習）
+                if (diff < threshold) {
+                    // 徐々に背景を更新することで、ノイズや光の変化に対応
+                    backgroundData.data[i] = backgroundData.data[i] * 0.9 + currentFrame.data[i] * 0.1;
+                    backgroundData.data[i+1] = backgroundData.data[i+1] * 0.9 + currentFrame.data[i+1] * 0.1;
+                    backgroundData.data[i+2] = backgroundData.data[i+2] * 0.9 + currentFrame.data[i+2] * 0.1;
+                }
+                
+                // 直前のフレーム情報を更新
+                lastFrameData.data[i] = currentFrame.data[i];
+                lastFrameData.data[i+1] = currentFrame.data[i+1];
+                lastFrameData.data[i+2] = currentFrame.data[i+2];
             }
         }
 
-        resultCtx.putImageData(backgroundFrame, 0, 0);
+        resultCtx.putImageData(backgroundData, 0, 0);
+        status.innerText = "背景抽出中... 動いているものは消えます";
         requestAnimationFrame(processLoop);
     }
 </script>
