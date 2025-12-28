@@ -13,6 +13,11 @@
         #switchBtn { background: #6c757d; color: white; display: none; }
         #captureBtn { background: #28a745; color: white; }
         #captureBtn:disabled { background: #555; cursor: not-allowed; }
+        /* 保存系ボタンのスタイル */
+        .save-controls { margin-top: 15px; display: none; }
+        #downloadBtn { background: #ff9800; color: white; }
+        #copyBtn { background: #9c27b0; color: white; }
+        
         input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 80px; margin: 5px; }
         .status { font-size: 16px; color: #ffeb3b; margin: 10px; font-weight: bold; }
     </style>
@@ -32,6 +37,11 @@
         </div>
         <button id="captureBtn" disabled>撮影開始</button>
         <div class="status" id="status">カメラを許可してください</div>
+
+        <div id="saveControls" class="save-controls">
+            <button id="downloadBtn">画像を保存</button>
+            <button id="copyBtn">クリップボードにコピー</button>
+        </div>
     </div>
 
     <div id="resultContainer">
@@ -48,19 +58,19 @@
     const startBtn = document.getElementById('startBtn');
     const switchBtn = document.getElementById('switchBtn');
     const captureBtn = document.getElementById('captureBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const saveControls = document.getElementById('saveControls');
     const status = document.getElementById('status');
 
     let capturedFrames = [];
     let currentStream = null;
-    let currentFacingMode = "environment"; // 背面カメラをデフォルトに設定
+    let currentFacingMode = "environment";
 
-    // カメラを起動・再起動する関数
     async function initCamera(facingMode) {
-        // 既存のストリームがあれば停止
         if (currentStream) {
             currentStream.getTracks().forEach(track => track.stop());
         }
-
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ 
                 video: { facingMode: facingMode }, 
@@ -70,8 +80,6 @@
             video.srcObject = stream;
             status.innerText = "固定して「撮影開始」を押してください";
             captureBtn.disabled = false;
-            
-            // UIの表示切り替え
             startBtn.style.display = 'none';
             switchBtn.style.display = 'inline-block';
         } catch (err) {
@@ -80,9 +88,7 @@
     }
 
     startBtn.onclick = () => initCamera(currentFacingMode);
-
     switchBtn.onclick = () => {
-        // モードを切り替え
         currentFacingMode = (currentFacingMode === "environment") ? "user" : "environment";
         initCamera(currentFacingMode);
     };
@@ -92,7 +98,8 @@
         const interval = parseInt(document.getElementById("cooldown").value) || 1000;
 
         captureBtn.disabled = true;
-        switchBtn.disabled = true; // 撮影中は切り替え不可
+        switchBtn.disabled = true;
+        saveControls.style.display = 'none'; // 新しい撮影時は隠す
         capturedFrames = [];
         
         const w = video.videoWidth;
@@ -101,7 +108,6 @@
         canvas.height = resultCanvas.height = h;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-        // 1. 撮影フェーズ
         for (let i = 0; i < numFrames; i++) {
             status.innerText = `撮影中: ${i + 1} / ${numFrames}`;
             ctx.drawImage(video, 0, 0, w, h);
@@ -109,13 +115,10 @@
             if (i < numFrames - 1) await new Promise(r => setTimeout(r, interval));
         }
 
-        status.innerText = "計算中... (中央値を算出しています)";
-        
-        // 描画更新を待つ
+        status.innerText = "計算中...";
         await new Promise(r => requestAnimationFrame(r));
         await new Promise(r => setTimeout(r, 100));
 
-        // 2. 中央値計算フェーズ
         processMedian(w, h, numFrames);
     };
 
@@ -126,24 +129,45 @@
 
         for (let i = 0; i < numPixels; i++) {
             const idx = i * 4;
-            // RGBの各チャンネルごとに計算
             for (let c = 0; c < 3; c++) {
                 const values = [];
                 for (let f = 0; f < numFrames; f++) {
                     values.push(capturedFrames[f][idx + c]);
                 }
-                // 昇順に並び替えて中央の値を取得（ノイズ除去）
                 values.sort((a, b) => a - b);
                 output.data[idx + c] = values[Math.floor(numFrames / 2)];
             }
-            output.data[idx + 3] = 255; // Alpha
+            output.data[idx + 3] = 255;
         }
 
         resultCtx.putImageData(output, 0, 0);
-        status.innerText = "完了！動いているものが消えました。";
+        status.innerText = "完了！";
         captureBtn.disabled = false;
         switchBtn.disabled = false;
+        saveControls.style.display = 'block'; // 保存ボタンを表示
     }
+
+    // ダウンロード機能
+    downloadBtn.onclick = () => {
+        const link = document.createElement('a');
+        link.download = `background_${Date.now()}.png`;
+        link.href = resultCanvas.toDataURL('image/png');
+        link.click();
+    };
+
+    // クリップボードにコピー機能
+    copyBtn.onclick = () => {
+        resultCanvas.toBlob(async (blob) => {
+            try {
+                const data = [new ClipboardItem({ [blob.type]: blob })];
+                await navigator.clipboard.write(data);
+                alert("クリップボードにコピーしました！");
+            } catch (err) {
+                console.error(err);
+                alert("コピーに失敗しました。ブラウザの設定を確認してください。");
+            }
+        });
+    };
 </script>
 </body>
 </html>
