@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人が消えるカメラlive / 多数決露光版</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; text-align: center; background: #000; color: #fff; margin: 0; padding: 10px; }
+        canvas { max-width: 100%; border-radius: 12px; background: #111; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        
+        /* 統計情報パネル */
+        .stats-panel {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin: 10px auto;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            max-width: 480px;
+            font-size: 11px;
+            text-align: left;
+            border: 1px solid #333;
+        }
+        .stats-item span { display: block; color: #888; margin-bottom: 2px; }
+        .stats-item b { font-size: 14px; color: #00d4ff; font-family: monospace; }
+
+        .controls { margin: 10px auto; padding: 20px; background: #1a1a1a; border-radius: 20px; max-width: 480px; }
+        button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 10px; cursor: pointer; font-weight: bold; margin-bottom: 10px; transition: 0.2s; }
+        #captureBtn { background: #e91e63; color: white; }
+        #captureBtn.running { background: #555; }
+        #resetBtn { background: #333; color: white; }
+        #saveBtn { background: #34c759; color: #000; display: none; }
+        
+        video { display: none; }
+    </style>
+</head>
+<body>
+
+    <h2>人が消えるカメラlive</h2>
+    <p>多数決露光版</p>
+
+    <canvas id="resultCanvas"></canvas>
+    
+    <div class="stats-panel">
+        <div class="stats-item"><span>フレーム数</span><b id="statFrames">0</b></div>
+        <div class="stats-item"><span>推定メモリ消費量</span><b id="statMem">0 MB</b></div>
+        <div class="stats-item"><span>解像度</span><b id="statRes">0 x 0</b></div>
+        <div class="stats-item"><span>状態</span><b id="statStatus">待機中</b></div>
+    </div>
+
+    <video id="video" autoplay playsinline></video>
+    
+    <div class="controls">
+        <button id="captureBtn">生成開始</button>
+        <button id="resetBtn">リセット / 再読込</button>
+        <button id="saveBtn">画像を保存</button>
+    </div>
+
+<script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('resultCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // UI要素
+    const captureBtn = document.getElementById('captureBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const statFrames = document.getElementById('statFrames');
+    const statMem = document.getElementById('statMem');
+    const statRes = document.getElementById('statRes');
+    const statStatus = document.getElementById('statStatus');
+
+    let isRunning = false;
+    let frameCount = 0;
+    
+    let histR, histG, histB;
+    let currentResult;
+    const BIN_SIZE = 128; // 2ピクセルずつまとめて128段階でカウント（メモリ節約）
+
+    async function init() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
+            });
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                const w = video.videoWidth;
+                const h = video.videoHeight;
+                canvas.width = w;
+                canvas.height = h;
+                
+                const size = w * h;
+                // メモリ計算: 128段階 * 3色 * ピクセル数
+                const memBytes = size * BIN_SIZE * 3;
+                statMem.innerText = `${(memBytes / (1024 * 1024)).toFixed(1)} MB`;
+                statRes.innerText = `${w} x ${h}`;
+
+                histR = new Uint8Array(size * BIN_SIZE);
+                histG = new Uint8Array(size * BIN_SIZE);
+                histB = new Uint8Array(size * BIN_SIZE);
+                currentResult = new Uint8ClampedArray(size * 4).fill(255);
+                
+                statStatus.innerText = "Ready";
+            };
+        } catch (e) {
+            statStatus.innerText = "Error: Camera Fail";
+        }
+    }
+
+    init();
+
+    captureBtn.onclick = () => {
+        isRunning = !isRunning;
+        captureBtn.innerText = isRunning ? "停止" : "再開";
+        statStatus.innerText = isRunning ? "実行中..." : "停止中";
+        if (isRunning) {
+            saveBtn.style.display = "block";
+            loop();
+        }
+    };
+
+    resetBtn.onclick = () => location.reload();
+
+    function loop() {
+        if (!isRunning) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
+        const size = w * h;
+
+        // 画面外キャンバスで現在の映像を取得
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = w;
+        tempCanvas.height = h;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(video, 0, 0);
+        const imgData = tempCtx.getImageData(0, 0, w, h).data;
+
+        frameCount++;
+        statFrames.innerText = frameCount;
+
+        for (let i = 0; i < size; i++) {
+            const idx = i * 4;
+            
+            // 色を2で割ってBIN_SIZE(128)の範囲に収める
+            const r = imgData[idx] >> 1;
+            const g = imgData[idx+1] >> 1;
+            const b = imgData[idx+2] >> 1;
+
+            const base = i * BIN_SIZE;
+            if (histR[base + r] < 255) histR[base + r]++;
+            if (histG[base + g] < 255) histG[base + g]++;
+            if (histB[base + b] < 255) histB[base + b]++;
+
+            // 15フレームに1回結果を更新（計算負荷分散）
+            if (frameCount % 15 === 1) {
+                currentResult[idx]   = getMaxColor(histR, i) << 1;
+                currentResult[idx+1] = getMaxColor(histG, i) << 1;
+                currentResult[idx+2] = getMaxColor(histB, i) << 1;
+            }
+        }
+
+        ctx.putImageData(new ImageData(currentResult, w, h), 0, 0);
+        requestAnimationFrame(loop);
+    }
+
+    function getMaxColor(hist, pixelIdx) {
+        const start = pixelIdx * BIN_SIZE;
+        let maxVal = 0;
+        let maxColor = 0;
+        for (let c = 0; c < BIN_SIZE; c++) {
+            const val = hist[start + c];
+            if (val > maxVal) {
+                maxVal = val;
+                maxColor = c;
+            }
+        }
+        return maxColor;
+    }
+
+    saveBtn.onclick = () => {
+        const link = document.createElement('a');
+        link.download = `majority_stats_${Date.now()}.png`;
+        link.href = canvas.toDataURL();
+        link.click();
+    };
+</script>
+</body>
+</html>
