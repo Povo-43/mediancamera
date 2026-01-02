@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人が消えるカメラ / 中央値基準の自然化処理版</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; text-align: center; background: #000; color: #fff; margin: 0; padding: 15px; }
+        video, canvas { max-width: 100%; border-radius: 12px; background: #111; margin-bottom: 10px; }
+        .controls { margin: 0 auto; padding: 20px; background: #1a1a1a; border-radius: 20px; max-width: 480px; }
+        .btn-row { display: flex; gap: 8px; margin-bottom: 15px; }
+        button { flex: 1; padding: 14px; font-size: 14px; border: none; border-radius: 10px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        #startBtn { background: #007aff; color: white; width: 100%; }
+        #switchBtn { background: #333; color: white; display: none; }
+        #captureBtn { background: #34c759; color: #000; font-size: 16px; }
+        #captureBtn:disabled { background: #222; color: #555; cursor: not-allowed; }
+        
+        .status-box { margin: 10px 0; }
+        .status { font-size: 12px; color: #ffd60a; margin-bottom: 5px; }
+        .progress-bar { width: 100%; height: 4px; background: #333; border-radius: 2px; overflow: hidden; display: none; }
+        .progress-fill { width: 0%; height: 100%; background: #34c759; transition: width 0.1s; }
+        
+        .settings { display: flex; justify-content: center; gap: 15px; font-size: 12px; color: #888; margin-bottom: 15px; }
+        input { background: #000; border: 1px solid #444; color: #fff; padding: 4px; border-radius: 4px; width: 45px; text-align: center; }
+        #saveArea { display: none; margin-top: 15px; }
+        #downloadBtn { background: #ff9500; color: white; width: 100%; }
+    </style>
+</head>
+<body>
+
+<h1>人が消えるカメラ</h1>
+<p>中央値基準の自然化処理版</p>
+    <video id="video" autoplay playsinline></video>
+    
+    <div class="controls">
+        <button id="startBtn">カメラを起動</button>
+        
+        <div class="btn-row">
+            <button id="switchBtn">カメラ切替</button>
+            <button id="captureBtn" disabled>背景生成を開始</button>
+        </div>
+
+        <div class="settings">
+            <div>枚数: <input type="number" id="nos" value="15"></div>
+            <div>間隔: <input type="number" id="cooldown" value="300">ms</div>
+        </div>
+
+        <div class="status-box">
+            <div id="status" class="status">Device Ready</div>
+            <div id="progressCont" class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+        </div>
+
+        <div id="saveArea">
+            <button id="downloadBtn">画像を保存</button>
+        </div>
+    </div>
+
+    <canvas id="resultCanvas"></canvas>
+    <canvas id="tempCanvas" style="display:none;"></canvas>
+    <footer>
+      <p>&copy; 2026 <a href="https://imme.kotoca.net">Povo43</a></p>
+    </footer>
+
+<script>
+    // --- Web Worker (高速・高精度ロジック) ---
+    const workerCode = `
+    self.onmessage = function(e) {
+        const { frames, width, height } = e.data;
+        const numPixels = width * height;
+        const numFrames = frames.length;
+        const output = new Uint8ClampedArray(numPixels * 4);
+        const mid = Math.floor(numFrames / 2);
+
+        // 高速化のため、バッファをピクセルループの外で使い回す
+        const rArr = new Uint8Array(numFrames);
+        const gArr = new Uint8Array(numFrames);
+        const bArr = new Uint8Array(numFrames);
+
+        for (let i = 0; i < numPixels; i++) {
+            const idx = i * 4;
+
+            // 1. 各チャンネルの中央値を抽出 (理想的な色の基準)
+            for (let f = 0; f < numFrames; f++) {
+                rArr[f] = frames[f][idx];
+                gArr[f] = frames[f][idx+1];
+                bArr[f] = frames[f][idx+2];
+            }
+            rArr.sort(); gArr.sort(); bArr.sort();
+            const mR = rArr[mid], mG = gArr[mid], mB = bArr[mid];
+
+            // 2. 実データの中から基準に最も近いベクトルを選択 (最短距離法)
+            let minD = 1000000;
+            let finalR = mR, finalG = mG, finalB = mB;
+
+            for (let f = 0; f < numFrames; f++) {
+                const dr = frames[f][idx] - mR;
+                const dg = frames[f][idx+1] - mG;
+                const db = frames[f][idx+2] - mB;
+                const dist = dr*dr + dg*dg + db*db;
+
+                if (dist < minD) {
+                    minD = dist;
+                    finalR = frames[f][idx];
+                    finalG = frames[f][idx+1];
+                    finalB = frames[f][idx+2];
+                }
+                if (minD === 0) break; // 完全に一致すれば即抜けて高速化
+            }
+
+            output[idx] = finalR; output[idx+1] = finalG; output[idx+2] = finalB; output[idx+3] = 255;
+
+            // 進捗をメインスレッドに通知
+            if (i % 50000 === 0) self.postMessage({progress: (i / numPixels * 100)});
+        }
+        self.postMessage({result: output}, [output.buffer]);
+    };
+    `;
+
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+
+    const video = document.getElementById('video');
+    const resultCanvas = document.getElementById('resultCanvas');
+    const tempCanvas = document.getElementById('tempCanvas');
+    const status = document.getElementById('status');
+    const progressCont = document.getElementById('progressCont');
+    const progressFill = document.getElementById('progressFill');
+    
+    let currentStream = null;
+    let facingMode = "environment";
+
+    // カメラ起動（バグ対策：完全停止と待機を挿入）
+    async function startCamera() {
+        if (currentStream) {
+            currentStream.getTracks().forEach(t => t.stop());
+            video.srcObject = null;
+            await new Promise(r => setTimeout(r, 200));
+        }
+        try {
+            currentStream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } } 
+            });
+            video.srcObject = currentStream;
+            video.onloadedmetadata = () => {
+                document.getElementById('captureBtn').disabled = false;
+                document.getElementById('switchBtn').style.display = 'inline-block';
+                document.getElementById('startBtn').style.display = 'none';
+                status.innerText = "Ready: 端末を固定してください";
+            };
+        } catch (e) { status.innerText = "Error: カメラを起動できません"; }
+    }
+
+    document.getElementById('startBtn').onclick = startCamera;
+    document.getElementById('switchBtn').onclick = () => {
+        facingMode = (facingMode === "environment") ? "user" : "environment";
+        startCamera();
+    };
+
+    document.getElementById('captureBtn').onclick = async () => {
+        const nos = parseInt(document.getElementById('nos').value);
+        const cooldown = parseInt(document.getElementById('cooldown').value);
+        const w = video.videoWidth, h = video.videoHeight;
+        
+        tempCanvas.width = resultCanvas.width = w;
+        tempCanvas.height = resultCanvas.height = h;
+        const ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
+        
+        const frames = [];
+        document.getElementById('captureBtn').disabled = true;
+        progressCont.style.display = 'block';
+        progressFill.style.width = '0%';
+
+        for (let i = 0; i < nos; i++) {
+            status.innerText = `撮影中: ${i+1}/${nos}`;
+            ctx.drawImage(video, 0, 0, w, h);
+            frames.push(ctx.getImageData(0, 0, w, h).data);
+            await new Promise(r => setTimeout(r, cooldown));
+        }
+
+        status.innerText = "解析中...";
+        worker.postMessage({ frames, width: w, height: h }, frames.map(f => f.buffer));
+    };
+
+    worker.onmessage = (e) => {
+        if (e.data.progress) {
+            progressFill.style.width = e.data.progress + '%';
+        } else if (e.data.result) {
+            const ctx = resultCanvas.getContext('2d');
+            ctx.putImageData(new ImageData(e.data.result, resultCanvas.width, resultCanvas.height), 0, 0);
+            status.innerText = "生成完了！";
+            progressCont.style.display = 'none';
+            document.getElementById('captureBtn').disabled = false;
+            document.getElementById('saveArea').style.display = 'block';
+        }
+    };
+
+    document.getElementById('downloadBtn').onclick = () => {
+        const a = document.createElement('a');
+        a.href = resultCanvas.toDataURL('image/png');
+        a.download = `smart_bg_${Date.now()}.png`;
+        a.click();
+    };
+</script>
+</body>
+</html>
