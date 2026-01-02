@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人が消えるカメラ</title>
+    <meta property="og:title" content="人が消えるカメラ">
+    <meta property="og:description" content="中央値フィルタで動く人を取り除けるサイト。">
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; }
+        video, canvas { max-width: 100%; border-radius: 8px; background: #000; margin-bottom: 10px; }
+        .controls { margin: 20px 0; padding: 15px; background: #333; border-radius: 10px; }
+        button { padding: 12px 24px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; font-weight: bold; }
+        #startBtn { background: #007bff; color: white; }
+        #switchBtn { background: #6c757d; color: white; display: none; }
+        #captureBtn { background: #28a745; color: white; }
+        #captureBtn:disabled { background: #555; cursor: not-allowed; }
+        /* 保存系ボタンのスタイル */
+        .save-controls { margin-top: 15px; display: none; }
+        #downloadBtn { background: #ff9800; color: white; }
+        #copyBtn { background: #9c27b0; color: white; }
+        
+        input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #444; color: white; width: 80px; margin: 5px; }
+        .status { font-size: 16px; color: #ffeb3b; margin: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>人が消えるカメラ</h2>
+
+    <video id="video" autoplay playsinline></video>
+    
+    <div class="controls">
+        <button id="startBtn">カメラ起動</button>
+        <button id="switchBtn">カメラ切り替え</button>
+        <div>
+            枚数: <input type="number" id="nos" value="5" min="3" max="100">
+            間隔(ms): <input type="number" id="cooldown" value="1000" min="10">
+        </div>
+        <button id="captureBtn" disabled>撮影開始</button>
+        <div class="status" id="status">カメラを許可してください</div>
+
+        <div id="saveControls" class="save-controls">
+            <button id="downloadBtn">画像を保存</button>
+            <button id="copyBtn">クリップボードにコピー</button>
+        </div>
+    </div>
+
+    <div id="resultContainer">
+        <p>【生成された背景】</p>
+        <canvas id="resultCanvas"></canvas>
+    </div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+
+<script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const resultCanvas = document.getElementById('resultCanvas');
+    const startBtn = document.getElementById('startBtn');
+    const switchBtn = document.getElementById('switchBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const saveControls = document.getElementById('saveControls');
+    const status = document.getElementById('status');
+
+    let capturedFrames = [];
+    let currentStream = null;
+    let currentFacingMode = "environment";
+
+    async function initCamera(facingMode) {
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
+        }
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: facingMode }, 
+                audio: false 
+            });
+            currentStream = stream;
+            video.srcObject = stream;
+            status.innerText = "固定して「撮影開始」を押してください";
+            captureBtn.disabled = false;
+            startBtn.style.display = 'none';
+            switchBtn.style.display = 'inline-block';
+        } catch (err) {
+            status.innerText = "エラー: " + err.message;
+        }
+    }
+
+    startBtn.onclick = () => initCamera(currentFacingMode);
+    switchBtn.onclick = () => {
+        currentFacingMode = (currentFacingMode === "environment") ? "user" : "environment";
+        initCamera(currentFacingMode);
+    };
+
+    captureBtn.onclick = async () => {
+        const numFrames = parseInt(document.getElementById("nos").value) || 5;
+        const interval = parseInt(document.getElementById("cooldown").value) || 1000;
+
+        captureBtn.disabled = true;
+        switchBtn.disabled = true;
+        saveControls.style.display = 'none'; // 新しい撮影時は隠す
+        capturedFrames = [];
+        
+        const w = video.videoWidth;
+        const h = video.videoHeight;
+        canvas.width = resultCanvas.width = w;
+        canvas.height = resultCanvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        for (let i = 0; i < numFrames; i++) {
+            status.innerText = `撮影中: ${i + 1} / ${numFrames}`;
+            ctx.drawImage(video, 0, 0, w, h);
+            capturedFrames.push(ctx.getImageData(0, 0, w, h).data);
+            if (i < numFrames - 1) await new Promise(r => setTimeout(r, interval));
+        }
+
+        status.innerText = "計算中...";
+        await new Promise(r => requestAnimationFrame(r));
+        await new Promise(r => setTimeout(r, 100));
+
+        processMedian(w, h, numFrames);
+    };
+
+    function processMedian(w, h, numFrames) {
+        const resultCtx = resultCanvas.getContext('2d');
+        const output = resultCtx.createImageData(w, h);
+        const numPixels = w * h;
+
+        for (let i = 0; i < numPixels; i++) {
+            const idx = i * 4;
+            for (let c = 0; c < 3; c++) {
+                const values = [];
+                for (let f = 0; f < numFrames; f++) {
+                    values.push(capturedFrames[f][idx + c]);
+                }
+                values.sort((a, b) => a - b);
+                output.data[idx + c] = values[Math.floor(numFrames / 2)];
+            }
+            output.data[idx + 3] = 255;
+        }
+
+        resultCtx.putImageData(output, 0, 0);
+        status.innerText = "完了！";
+        captureBtn.disabled = false;
+        switchBtn.disabled = false;
+        saveControls.style.display = 'block'; // 保存ボタンを表示
+    }
+
+    // ダウンロード機能
+    downloadBtn.onclick = () => {
+        const link = document.createElement('a');
+        link.download = `background_${Date.now()}.png`;
+        link.href = resultCanvas.toDataURL('image/png');
+        link.click();
+    };
+
+    // クリップボードにコピー機能
+    copyBtn.onclick = () => {
+        resultCanvas.toBlob(async (blob) => {
+            try {
+                const data = [new ClipboardItem({ [blob.type]: blob })];
+                await navigator.clipboard.write(data);
+                alert("クリップボードにコピーしました！");
+            } catch (err) {
+                console.error(err);
+                alert("コピーに失敗しました。ブラウザの設定を確認してください。");
+            }
+        });
+    };
+</script>
+</body>
+</html>
